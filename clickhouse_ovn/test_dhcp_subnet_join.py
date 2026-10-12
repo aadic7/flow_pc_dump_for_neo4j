@@ -49,6 +49,41 @@ def test_dhcp_joins_via_lsp_when_external_ids_have_no_ls():
     assert switch["subnets"][0][0] == DHCP
 
 
+def test_dhcpv4_options_ovsdb_uuid_tag():
+    nb = {
+        "Logical_Switch": [
+            {"_uuid": ["uuid", LS], "name": "network_1", "ports": ["set", [["uuid", LSP]]]}
+        ],
+        "Logical_Switch_Port": [
+            {
+                "_uuid": ["uuid", LSP],
+                "name": "port_1",
+                "type": "",
+                "dhcpv4_options": ["uuid", DHCP],
+            }
+        ],
+        "DHCP_Options": [
+            {
+                "_uuid": ["uuid", DHCP],
+                "cidr": "10.1.2.0/24",
+                "options": {"router": "10.1.2.1", "mtu": "9000"},
+                "external_ids": {},
+            }
+        ],
+        "Logical_Router": [],
+        "Logical_Router_Port": [],
+        "Logical_Router_Static_Route": [],
+        "NAT": [],
+    }
+    built = path_tables.build_path_tables(nb, {})
+    row = built["ovn_subnet"][0]
+    assert row["nb_ls_uuid"] == LS, row
+    assert row["nb_dhcp_uuid"] == DHCP, row
+    assert row["nb_cidr"] == "10.1.2.0/24", row
+    assert row["nb_mtu"] == 9000, row
+
+
 if __name__ == "__main__":
     test_dhcp_joins_via_lsp_when_external_ids_have_no_ls()
+    test_dhcpv4_options_ovsdb_uuid_tag()
     print("ok")

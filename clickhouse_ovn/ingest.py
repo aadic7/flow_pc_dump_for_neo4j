@@ -101,12 +101,22 @@ def is_uuid(s: str) -> bool:
 
 
 def as_uuid(val: Any) -> str:
-    if val is None:
+    """UUID from a dump cell. OVSDB optional refs are [\"uuid\", \"<id>\"]."""
+    if val is None or val == [] or val == {}:
         return ZERO
     if isinstance(val, list):
         if not val:
             return ZERO
-        val = val[0]
+        # ["uuid", "cccc-...."]  -- first item is the type tag, not the id
+        if str(val[0]) == "uuid" and len(val) >= 2:
+            return as_uuid(val[1])
+        if str(val[0]) == "set" and len(val) >= 2:
+            return as_uuid(val[1])
+        for item in val:
+            uid = as_uuid(item)
+            if uid != ZERO:
+                return uid
+        return ZERO
     s = str(val).strip().strip('"')
     return s if is_uuid(s) else ZERO
 
@@ -128,11 +138,16 @@ def as_str_list(val: Any) -> List[str]:
     if val is None or val == [] or val == {}:
         return []
     if isinstance(val, list):
+        if val and str(val[0]) in ("set", "uuid") and len(val) >= 2:
+            return as_str_list(val[1]) if str(val[0]) == "set" else [as_str(val[1])]
         out = []
         for x in val:
-            s = as_str(x)
-            if s:
-                out.append(s)
+            if isinstance(x, list):
+                out.extend(as_str_list(x))
+            else:
+                s = as_str(x)
+                if s and s not in ("set", "uuid", "map"):
+                    out.append(s)
         return out
     s = as_str(val)
     return [s] if s else []
