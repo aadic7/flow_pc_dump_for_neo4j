@@ -152,13 +152,51 @@ def _ext_port(name: str, networks: list) -> int:
 
 def _subnet_uuid(external_ids) -> str:
     ovn = _ovn()
-    if not isinstance(external_ids, dict):
-        return ovn.ZERO
-    raw = external_ids.get("subnet_id") or external_ids.get("subnet-id") or ""
-    raw = ovn.as_str(raw)
-    if raw.startswith("subnet_"):
-        raw = raw[len("subnet_"):]
-    return ovn.as_uuid(raw)
+    ext = ovn.as_map(external_ids)
+    for key in (
+        "subnet_id",
+        "subnet-id",
+        "subnet_uuid",
+        "neutron:subnet_id",
+        "neutron:subnet_uuid",
+    ):
+        raw = ovn.as_str(ext.get(key, ""))
+        if raw.startswith("subnet_"):
+            raw = raw[len("subnet_"):]
+        uid = ovn.as_uuid(raw)
+        if uid != ovn.ZERO:
+            return uid
+    return ovn.ZERO
+
+
+def _ls_from_dhcp_ext(ext, switch_by_uuid, switch_by_name, sid: str) -> str:
+    ovn = _ovn()
+    zero = ovn.ZERO
+    for key in (
+        "ls_uuid",
+        "logical_switch",
+        "logical-switch",
+        "network_id",
+        "neutron:network_id",
+        "neutron:network_uuid",
+    ):
+        uid = ovn.as_uuid(ext.get(key, ""))
+        if uid != zero and uid in switch_by_uuid:
+            return uid
+    for key in (
+        "ls_name",
+        "logical_switch_name",
+        "network_name",
+        "neutron:network_name",
+    ):
+        name = ovn.as_str(ext.get(key, ""))
+        if name and name in switch_by_name:
+            return switch_by_name[name]["ls_uuid"]
+    if sid and sid != zero:
+        named = switch_by_name.get("network_%s" % sid)
+        if named:
+            return named["ls_uuid"]
+    return zero
 
 
 def _index_sb(sb: dict):
@@ -252,38 +290,44 @@ def build_path_tables(nb: dict, sb: dict) -> dict:
 
     lsp_by_uuid = {}
     dhcp_ls = {}
-    dhcp_ls_router = {}
+    dhcp_lsps = {}
     for row in nb.get("Logical_Switch_Port", []):
         uid = ovn.as_uuid(row.get("_uuid"))
         lsp_by_uuid[uid] = row
-        dhcp = ovn.as_uuid(row.get("dhcpv4_options"))
         ls = lsp_to_ls.get(uid, zero)
-        if dhcp == zero or ls == zero:
+        if ls == zero:
             continue
-        if ovn.as_str(row.get("type")) == "router":
-            dhcp_ls_router.setdefault(dhcp, ls)
-        else:
-            dhcp_ls[dhcp] = ls
+        for field in ("dhcpv4_options", "dhcpv6_options"):
+            dhcp = ovn.as_uuid(row.get(field))
+            if dhcp == zero:
+                continue
+            if ovn.as_str(row.get("type")) == "router":
+                dhcp_ls.setdefault(dhcp, ls)
+            else:
+                dhcp_ls[dhcp] = ls
+            dhcp_lsps.setdefault(dhcp, [])
+            if uid not in dhcp_lsps[dhcp]:
+                dhcp_lsps[dhcp].append(uid)
 
     switch_by_name = {item["nb_name"]: item for item in switches if item.get("nb_name")}
     switch_by_uuid = {item["ls_uuid"]: item for item in switches}
     subnets = {}
+    nested = {item["ls_uuid"]: [] for item in switches}
     for row in nb.get("DHCP_Options", []):
-        sid = _subnet_uuid(row.get("external_ids"))
-        if sid == zero:
-            continue
+        ext = ovn.as_map(row.get("external_ids"))
+        sid = _subnet_uuid(ext)
         opts = ovn.as_map(row.get("options"))
         dhcp = ovn.as_uuid(row.get("_uuid"))
-        ls = dhcp_ls.get(dhcp) or dhcp_ls_router.get(dhcp, zero)
+        if dhcp == zero:
+            continue
+        ls = dhcp_ls.get(dhcp, zero)
         if ls == zero:
-            named = switch_by_name.get("network_%s" % sid)
-            if named:
-                ls = named["ls_uuid"]
+            ls = _ls_from_dhcp_ext(ext, switch_by_uuid, switch_by_name, sid)
         sb_ls = _sb_of(by_nb, ls) if ls != zero else {
             "sb_datapath_uuid": zero, "sb_tunnel_key": 0, "sb_egress_tunnel_key": 0, "sb_name": "",
         }
-        subnets[sid] = {
-            "subnet_uuid": sid,
+        rec = {
+            "subnet_uuid": sid if sid != zero else dhcp,
             "nb_cidr": ovn.as_str(row.get("cidr")),
             "nb_gateway_ip": ovn.as_str(opts.get("router")),
             "nb_gateway_mac": ovn.as_str(opts.get("server_mac")),
@@ -296,6 +340,24 @@ def build_path_tables(nb: dict, sb: dict) -> dict:
             "sb_egress_tunnel_key": sb_ls["sb_egress_tunnel_key"],
             "updated_at": ts,
         }
+        subnets[dhcp] = rec
+        if ls != zero:
+            nested[ls].append((
+                dhcp,
+                rec["subnet_uuid"],
+                rec["nb_cidr"],
+                rec["nb_gateway_ip"],
+                rec["nb_gateway_mac"],
+                rec["nb_mtu"],
+                dhcp_lsps.get(dhcp, []),
+                _pairs(opts),
+                _pairs(ext),
+                rec["sb_datapath_uuid"],
+                rec["sb_tunnel_key"],
+                rec["sb_egress_tunnel_key"],
+            ))
+    for item in switches:
+        item["subnets"] = nested.get(item["ls_uuid"], [])
 
     lrp_to_lr = {}
     nat_to_lr = {}
@@ -554,6 +616,8 @@ def ingest_only(nb_path: str, sb_path: str) -> int:
                 raise
     built = build_path_tables(nb, sb)
     for table, rows in built.items():
+        if table == "ovn_switch":
+            rows = [{k: v for k, v in row.items() if k != "subnets"} for row in rows]
         ovn.insert_rows(table, rows)
     print("path tables done")
     return 0
@@ -577,6 +641,8 @@ def _add_columns(ovn) -> None:
     statements = [
         "ALTER TABLE flow_ovn.ovn_l2gw ADD COLUMN IF NOT EXISTS nb_ls_name String DEFAULT ''",
         "ALTER TABLE flow_ovn.ovn_l2gw ADD COLUMN IF NOT EXISTS sb_datapath_uuid UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')",
+        "ALTER TABLE flow_ovn.ovn_lsp ADD COLUMN IF NOT EXISTS dhcpv4_options UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')",
+        "ALTER TABLE flow_ovn.ovn_lsp ADD COLUMN IF NOT EXISTS dhcpv6_options UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')",
     ]
     for sql in statements:
         try:

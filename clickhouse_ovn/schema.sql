@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS flow_ovn.ovn_lsp
     options_network_name   String DEFAULT '',
     peer                   String DEFAULT '',
     nic_uuid               UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000'),
+    dhcpv4_options         UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000'),
+    dhcpv6_options         UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000'),
     updated_at             DateTime64(3) DEFAULT now64()
 )
 ENGINE = ReplacingMergeTree(updated_at)

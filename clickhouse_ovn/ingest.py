@@ -141,6 +141,16 @@ def as_str_list(val: Any) -> List[str]:
 def as_map(val: Any) -> Dict[str, str]:
     if isinstance(val, dict):
         return {str(k): as_str(v) for k, v in val.items()}
+    if isinstance(val, list):
+        out: Dict[str, str] = {}
+        for item in val:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                out[str(item[0])] = as_str(item[1])
+            elif isinstance(item, dict):
+                key = item.get("key") or item.get("name") or ""
+                if key:
+                    out[str(key)] = as_str(item.get("value") or item.get("val") or "")
+        return out
     return {}
 
 
@@ -558,6 +568,8 @@ def t_lsp(rows: List[Dict[str, Any]], lsp_to_ls: Dict[str, str]) -> List[dict]:
                 "options_network_name": opts.get("network_name", "") or opts.get("network-name", ""),
                 "peer": as_str(r.get("peer")),
                 "nic_uuid": nic_uuid_from_name(name),
+                "dhcpv4_options": as_uuid(r.get("dhcpv4_options")),
+                "dhcpv6_options": as_uuid(r.get("dhcpv6_options")),
                 "updated_at": ts,
             }
         )
@@ -1258,6 +1270,8 @@ def main() -> int:
     insert_rows("ovn_ls_stretch", stretch_rows)
     from path_tables import build_path_tables
     for table, path_rows in build_path_tables(nb, sb).items():
+        if table == "ovn_switch":
+            path_rows = [{k: v for k, v in row.items() if k != "subnets"} for row in path_rows]
         insert_rows(table, path_rows)
     print("done")
     return 0
